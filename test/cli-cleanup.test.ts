@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -24,6 +24,32 @@ async function sync(...args: string[]) {
     '--yes',
     ...args,
   ], { env: { ...process.env, CI: '1', DISABLE_TELEMETRY: '1' } })
+}
+
+// Simulate an interactive terminal without depending on the host's installed
+// agents or a platform-specific PTY library. Run the real CLI in the child.
+async function syncWithoutDetectedAgents() {
+  const preload = join(dir, 'interactive.mjs')
+  await writeFile(preload, `
+    import process from 'node:process'
+    import { agents } from ${JSON.stringify(new URL('../src/agents.ts', import.meta.url).href)}
+    Object.defineProperty(process.stdout, 'isTTY', { value: true })
+    for (const agent of Object.values(agents))
+      agent.detectInstalled = async () => false
+  `)
+  return exec(process.execPath, [
+    '--import',
+    import.meta.resolve('tsx'),
+    '--import',
+    pathToFileURL(preload).href,
+    cli,
+    '--cwd',
+    dir,
+    '--yes',
+  ], {
+    env: { PATH: '', SystemRoot: process.env.SystemRoot, CI: '1', DISABLE_TELEMETRY: '1' },
+    timeout: 10_000,
+  })
 }
 
 async function removeProvider() {
@@ -60,6 +86,19 @@ describe('cleanup with no discovered skills', () => {
     expect(JSON.parse(await readFile(join(dir, 'skills-npm-lock.json'), 'utf8'))).toEqual({ version: 3, skills: {} })
     expect(await readFile(join(ownDir, 'SKILL.md'), 'utf8')).toBe('user content')
     expect(await readFile(join(dir, '.agents/skills/foreign/SKILL.md'), 'utf8')).toBe('user content')
+  })
+
+  it('cleans the same agent targets when interactive --yes falls back to all agents', async () => {
+    await syncWithoutDetectedAgents()
+    for (const agentDir of agentDirs)
+      await expect(lstat(join(dir, agentDir, 'demo'))).resolves.toBeDefined()
+    await removeProvider()
+
+    await syncWithoutDetectedAgents()
+
+    for (const agentDir of agentDirs)
+      await expect(lstat(join(dir, agentDir, 'demo'))).rejects.toThrow()
+    expect(JSON.parse(await readFile(join(dir, 'skills-npm-lock.json'), 'utf8')).skills).toEqual({})
   })
 
   it('cleans links when the final skill is excluded', async () => {
@@ -104,6 +143,15 @@ describe('cleanup with no discovered skills', () => {
     await sync()
 
     expect(JSON.parse(await readFile(join(dir, 'skills-npm-lock.json'), 'utf8')).skills).toEqual({})
+  })
+
+  it('keeps an empty project unchanged when interactive --yes finds no agents', async () => {
+    await removeProvider()
+    await syncWithoutDetectedAgents()
+
+    await expect(lstat(join(dir, 'skills-npm-lock.json'))).rejects.toThrow()
+    for (const agentDir of agentDirs)
+      await expect(lstat(join(dir, agentDir))).rejects.toThrow()
   })
 
   it('leaves a new empty project without a lock or agent directories', async () => {

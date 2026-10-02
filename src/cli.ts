@@ -214,7 +214,7 @@ async function scanSkills(options: ResolvedOptions): Promise<{ skills: NpmSkill[
     if (options.cleanup !== false) {
       // There is nothing to install, but managed links can still need cleanup,
       // including committed links in projects without a skills-npm lock.
-      const targetAgents = withUniversalAgent(options.agents.length > 0 ? options.agents : await getDetectedAgents())
+      const targetAgents = withUniversalAgent(options.agents.length > 0 ? options.agents : await getDefaultTargetAgents(options))
       const removed = await cleanupStale([], targetAgents, options)
       if (removed > 0 || Object.keys(previous?.skills ?? {}).length > 0)
         await updateLock([], [], options)
@@ -311,6 +311,12 @@ async function promptAgents(detectedAgents: AgentType[]): Promise<AgentType[]> {
   return selected.filter(agent => otherAgents.includes(agent))
 }
 
+async function getDefaultTargetAgents(options: ResolvedOptions): Promise<AgentType[]> {
+  const detectedAgents = await getDetectedAgents()
+  // Installation and empty-scan cleanup must use the same fallback targets.
+  return isTTY && options.yes && detectedAgents.length === 0 ? getAllAgentTypes() : detectedAgents
+}
+
 async function getTargetAgents(options: ResolvedOptions): Promise<AgentType[]> {
   let targetAgents: AgentType[]
 
@@ -318,22 +324,17 @@ async function getTargetAgents(options: ResolvedOptions): Promise<AgentType[]> {
     targetAgents = options.agents
   }
   else {
-    const detectedAgents = await getDetectedAgents()
-    targetAgents = detectedAgents
+    targetAgents = await getDefaultTargetAgents(options)
 
-    if (!isTTY && detectedAgents.length === 0) {
+    if (!isTTY && targetAgents.length === 0) {
       const logger = isCI ? console.warn : console.error
       const exitCode = isCI ? 0 : 1
       logger('No agents detected. Use --agents to specify target agents')
       process.exit(exitCode)
     }
 
-    if (isTTY) {
-      if (options.yes)
-        targetAgents = detectedAgents.length > 0 ? detectedAgents : getAllAgentTypes()
-      else
-        targetAgents = await promptAgents(detectedAgents)
-    }
+    if (isTTY && !options.yes)
+      targetAgents = await promptAgents(targetAgents)
   }
 
   targetAgents = withUniversalAgent(targetAgents)
