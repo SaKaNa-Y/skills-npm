@@ -6,6 +6,13 @@
 [![JSDocs][jsdocs-src]][jsdocs-href]
 [![License][license-src]][license-href]
 
+> [!NOTE]
+> This package is merging with the [`skills`](https://github.com/vercel-labs/skills) CLI. [Read more](https://github.com/vercel-labs/skills/issues/2323).
+>
+> You can run it with `npx skills experimental_sync` to replace `npx skills-npm`.
+>
+> `skills-npm` will eventually be deprecated after the functionality is fully integrated into the `skills` CLI.
+
 A CLI that installs [agent skills](https://agentskills.io) through npm: it symlinks skills shipped inside your installed packages, and fetches the remote skills your packages declare in a `skills` field via the [`skills`](https://github.com/vercel-labs/skills) CLI.
 
 ## Why?

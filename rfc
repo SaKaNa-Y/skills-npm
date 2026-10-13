@@ -1,0 +1,158 @@
+# RFC: Install skills from npm packages
+
+## Why
+
+Many libraries are published as npm packages. A library author who writes a skill for their library has no good way to ship it with the package today. Users must find the skill in a Git repository and run `skills add`. When the library updates, the skill does not.
+
+[skills-npm](https://github.com/antfu/skills-npm) solves this as a separate tool. It imports the internals of this CLI through a Git submodule. This RFC proposes to enhance `skills experimental_sync` by porting the features of skills-npm into it, in small steps that each ship on their own. When the port is complete, the command graduates to `skills sync`.
+
+## Features at a glance
+
+- [Read direct dependencies](#read-direct-dependencies): only packages the project depends on
+- [Link, do not copy](#link-do-not-copy): skills update with the package
+- [Name by the skill](#name-by-the-skill-not-the-package): same names as `skills add`
+- [Resolve conflicts safely](#resolve-conflicts-safely): never shadow or replace what the user installed
+- [Remove what is gone](#remove-what-is-gone): uninstall a package, the skill goes too
+- [Follow `skills` fields](#follow-skills-fields): a package declares skills from other packages or Git
+- [Extended lock file](#extended-lock-file): shipped skills tracked in `skills-lock.json`
+- [Filters](#filters): `--include`, `--exclude`
+- [Scan cache](#scan-cache): fast repeat runs
+- [Workspaces](#workspaces): `--recursive`
+
+## What a package author does
+
+Put skills in one of these places and publish the package:
+
+```
+my-lib/
+  SKILL.md              # the whole package is one skill
+  skills/<name>/SKILL.md
+  dist/skills/<name>/SKILL.md
+```
+
+Or point at skills that live elsewhere with a `skills` field in `package.json`:
+
+```json
+{
+  "skills": [
+    "npm:@slidev/cli",
+    "vercel-labs/agent-skills@react-best-practices",
+    { "source": "owner/repo", "ref": "v2", "skills": ["a", "b"] }
+  ]
+}
+```
+
+`npm:<package>` means the skills that `<package>` ships. Any other string is a source that `skills add` accepts, except a local path. The full grammar is the [skills-npm SPEC](https://github.com/antfu/skills-npm/blob/main/SPEC.md).
+
+## What a project does
+
+```sh
+pnpm add my-lib
+skills sync
+```
+
+`skills sync` reads the project's direct dependencies, finds the skills they ship or declare, and links them into the agent directories. Add it to the `prepare` script so it runs after every install.
+
+## Features
+
+### Read direct dependencies
+
+Sync reads `dependencies` and `devDependencies` from the project's `package.json`. It looks only at those packages. Transitive packages are reached through `npm:<package>` in a `skills` field.
+
+### Link, do not copy
+
+The canonical directory `.agents/skills/<name>` becomes a relative symlink into `node_modules`:
+
+```
+.agents/skills/slidev -> ../../node_modules/@slidev/cli/skills/slidev
+```
+
+Agent directories such as `.claude/skills/<name>` link to the canonical directory, as they do for `skills add`. When the package updates, the skill updates with it. The links are committed to Git. Sync does not edit `.gitignore`.
+
+`--copy` copies instead of linking. The Eve agent always copies, because it rewrites `SKILL.md` on install.
+
+Before `npm install` runs, the links point at nothing. `skills list` does not show them until the packages are installed.
+
+### Name by the skill, not the package
+
+The installed name is the sanitized `name` from the frontmatter, the same rule that `skills add` uses. There is no `npm-` prefix. A `SKILL.md` without `name` and `description` is reported and skipped.
+
+### Resolve conflicts safely
+
+When two skills share a name, sync applies these rules in order:
+
+1. A skill that the user installed with `skills add` always wins. Sync never shadows it.
+2. Sync never replaces a directory or a link that it does not own. It warns and skips.
+3. A skill shipped in a package beats a skill declared as a remote source.
+4. A skill from a direct dependency beats a skill from a transitive dependency.
+5. If two skills still tie, sync installs neither and warns.
+
+Sync owns a link when its target is under `node_modules/`. Sync owns a directory when `skills-lock.json` says its source is `node_modules`.
+
+### Remove what is gone
+
+After each run, sync removes links whose target is under `node_modules/` and that this run did not produce. It also removes remote skills that no `skills` field requests anymore. `--no-cleanup` turns this off.
+
+### Follow `skills` fields
+
+Sync reads the `skills` field of the project and of every direct dependency. When an `npm:` entry points at a package, sync reads that package's `skills` field too. A visited set stops cycles.
+
+If the project's own field names a package that is not installed, sync exits with an error. If a dependency's field does, sync warns and skips. A malformed entry in the project's field is an error. A malformed field in a dependency is ignored with a warning.
+
+Remote entries install in the same process through the same code path as `skills add`. `--no-remote` skips them.
+
+### Extended lock file
+
+Sync writes to `skills-lock.json`. An entry for a shipped skill:
+
+```json
+"slidev": {
+  "source": "@slidev/cli",
+  "sourceType": "node_modules",
+  "skillPath": "skills/slidev",
+  "version": "52.0.0",
+  "computedHash": "sha256:...",
+  "via": "@my-org/skill-pack"
+}
+```
+
+`via` names the package whose `skills` field requested the skill. For the project's own field it is `.`. Remote skills that a field requested also carry `via`. Sync uses it to know which entries it can remove.
+
+### Filters
+
+`--include <patterns...>` and `--exclude <patterns...>` match a package name or a skill name. `*` matches inside one path segment, `**` matches across segments, `?` matches one character.
+
+### Scan cache
+
+Sync caches the scan result in `node_modules/.cache/skills/scan.json`. The key is a hash of the package manager lock file plus the scan options. `--force` ignores the cache.
+
+### Workspaces
+
+`--recursive` also reads each workspace package. Sync finds them from `pnpm-workspace.yaml` and from `workspaces` in `package.json`.
+
+### Other flags
+
+`--dry-run` prints the plan and changes nothing.
+
+### Not ported
+
+- The `skills-npm.config.ts` configuration file. The `skills` field is the declarative surface.
+- Probing `$PATH` for agent binaries. The CLI already detects agents.
+- The `setup` command. The README documents the `prepare` pattern instead.
+
+## Steps
+
+Each step is one PR and ships on its own. Steps 1 to 9 live under `skills experimental_sync`. Step 10 makes it `skills sync`.
+
+- [ ] Step 1: Scan. Read direct dependencies. Look in root `SKILL.md`, `skills/`, `dist/skills/`. Name by frontmatter. Add `skillPath` and `version` to the lock entry.
+- [ ] Step 2: Link. Add a `link` install mode to `installSkillForAgent`. Apply conflict rules 1, 2, 4, and 5. Add `--copy` and `--dry-run`.
+- [ ] Step 3: Cleanup. Remove stale links and lock entries. Add `--no-cleanup`.
+- [ ] Step 4: `--include` and `--exclude`.
+- [ ] Step 5: `skills` field with `npm:` entries. Parse per SPEC, resolve from the declaring package, follow chains, record `via`.
+- [ ] Step 6: Extract the resolve-discover-install core of `runAdd` into a function that returns results and never exits. `runAdd` and `experimental_install` call it. No user-facing change.
+- [ ] Step 7: Remote entries in the `skills` field. Use the function from step 6. Record `via`. Remove orphans. Add `--no-remote`. Apply conflict rule 3.
+- [ ] Step 8: Scan cache.
+- [ ] Step 9: `--recursive`.
+- [ ] Step 10: Graduate to `skills sync`. Keep `experimental_sync` as an alias. Document the command, the `skills` field, and the `prepare` pattern in the README.
+
+Each step adds tests that run the CLI against a temporary project with a fake `node_modules` and assert on the resulting files, links, and `skills-lock.json`.
